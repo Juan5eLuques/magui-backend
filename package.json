@@ -5,13 +5,20 @@
   "main": "./src/main.js",
   "scripts": {
     "start": "node ./src/main.js",
+    "build": "echo 'No build step required'",
     "dev": "node --watch ./src/main.js",
     "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "engines": {
+    "node": ">=22.0.0"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "type": "module",
+  "pnpm": {
+    "onlyBuiltDependencies": ["bcrypt"]
+  },
   "dependencies": {
     "bcrypt": "^6.0.0",
     "cors": "^2.8.6",
