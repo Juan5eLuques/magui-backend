@@ -1,0 +1,281 @@
+import { ENVIRONMENT } from "../config/environment.config.js";
+import mailer_transport from "../config/mailer.config.js";
+import ServerError from "../helpers/serverError.helper.js";
+import userRepository from "../repositories/user.repository.js";
+import { USER_ROLES_LIST } from "../const/roles.const.js";
+import bcrypt from 'bcrypt';
+import jwt from 'jsonwebtoken';
+
+/* ============================================================================
+   AuthController: maneja todo lo relacionado con la autenticacion de usuarios.
+   - register:    crear cuenta + enviar mail de verificacion.
+   - verifyEmail: validar el token que llega por mail y activar la cuenta.
+   - login:       validar credenciales y devolver un JWT de sesion.
+
+   Es la capa "controller": se ocupa de leer el request, validar datos basicos,
+   coordinar el repositorio/mailer y armar la response. La idea es que NO tenga
+   queries directas a la base (eso vive en el repository).
+   ============================================================================ */
+class AuthController {
+
+    /* ------------------------------------------------------------------------
+       REGISTRO DE USUARIO
+       Flujo:
+         1. Validar los datos que mando el cliente (nombre, email, pass, rol).
+         2. Verificar que el email no este ya registrado.
+         3. Hashear la contrasena (nunca se guarda en texto plano).
+         4. Generar un token de verificacion y crear el usuario con ese token.
+         5. Enviar un mail con un link que incluye ese token.
+       El usuario queda creado pero con email_verificado=false hasta que confirme.
+       ------------------------------------------------------------------------ */
+    async register(request, response) {
+        try {
+
+            const { nombre, email, password, role } = request.body;
+
+            /* Validaciones de entrada: cortamos temprano si algo no cumple.
+               Se usa ServerError (status 400 = "bad request") para devolver
+               un mensaje claro al cliente sobre que dato esta mal. */
+            if (!nombre || nombre.length <= 2) {
+                throw new ServerError("Nombre debe ser mayor a 2 caracteres", 400);
+            }
+
+            /* Regex simple para chequear formato de email (algo@algo.algo) */
+            if (!email || !/^\S+@\S+\.\S+$/.test(email)) {
+                throw new ServerError("Email inválido", 400);
+            }
+
+            if (!password || password.length < 6) {
+                throw new ServerError("Password debe tener al menos 6 caracteres", 400);
+            }
+
+            /* El rol debe ser uno de los permitidos: director, docente o familia.
+               USER_ROLES_LIST viene de las constantes, asi evitamos roles invalidos. */
+            if (!role || !USER_ROLES_LIST.includes(role)) {
+                throw new ServerError("Rol inválido. Debe ser: " + USER_ROLES_LIST.join(', '), 400);
+            }
+
+            /* No permitimos dos cuentas con el mismo email */
+            const existingUser = await userRepository.getByEmail(email);
+            if (existingUser) {
+                throw new ServerError("El email ya está registrado", 400);
+            }
+
+            /* Hasheo de la contrasena con bcrypt. El "12" son las salt rounds:
+               cuanto mas alto, mas seguro pero mas lento. 12 es un valor estandar.
+               Guardar el hash (no la pass real) es un requisito de seguridad. */
+            const hashed_password = await bcrypt.hash(password, 12);
+
+            /* Genero el token de verificacion ANTES de crear el usuario,
+               asi lo puedo guardar en el documento y despues encontrarlo al verificar.
+               El token es un JWT que lleva el email adentro y vence en 1 dia (1d):
+               si el usuario no verifica en ese plazo, el link deja de servir. */
+            const verification_token = jwt.sign(
+                { email: email },
+                ENVIRONMENT.JWT_SECRET,
+                { expiresIn: '1d' }
+            );
+
+            /* Creo el usuario en la base. Queda con email_verificado=false (default). */
+            const newUser = await userRepository.create(nombre, email, hashed_password, role, verification_token);
+
+            /* Envio el mail de verificacion. El link apunta a la API (que es quien
+               valida el token); la API despues redirige al frontend. */
+            await mailer_transport.sendMail({
+                to: email,
+                from: ENVIRONMENT.GMAIL_USERNAME,
+                subject: "Verifica tu gmail",
+                html: `
+                    <h1>Bienvenido/a a la Plataforma</h1>
+                    <p><a href='${ENVIRONMENT.URL_BACKEND}/api/auth/verify-email?verification_token=${verification_token}'>Click aquí</a> para verificar tu cuenta.</p>
+                `
+            });
+
+            /* Respondo 201 (creado). NO devuelvo la contrasena ni el token,
+               solo datos publicos del usuario. */
+            return response.status(201).json({
+                message: "Usuario registrado con éxito. Por favor verifique su correo.",
+                ok: true,
+                status: 201,
+                data: {
+                    user: {
+                        id: newUser._id,
+                        nombre: newUser.nombre,
+                        email: newUser.email,
+                        role: newUser.role
+                    }
+                }
+            });
+        } catch (error) {
+
+            /* Si el error es uno que nosotros lanzamos (ServerError), usamos su
+               status y mensaje. Si es un error inesperado, devolvemos 500 generico
+               y lo logueamos en consola para poder debuggear. */
+            if (error instanceof ServerError) {
+                return response.status(error.status).json({
+                    message: error.message,
+                    ok: false,
+                    status: error.status
+                });
+            } else {
+                console.error('Error crítico en registro:', error);
+                return response.status(500).json({
+                    message: "Error interno del servidor",
+                    ok: false,
+                    status: 500
+                });
+            }
+        }
+    }
+
+    /* ------------------------------------------------------------------------
+       VERIFICACION DE EMAIL
+       Se llega aca cuando el usuario hace click en el link del mail.
+       En vez de responder JSON, REDIRIGE al frontend a la pantalla
+       /verificar-cuenta con un parametro ?estado=... para que el front muestre
+       el cartel adecuado al usuario (una pantalla linda, no un JSON crudo).
+       Estados posibles: ok | ya-verificado | expirado | error
+       ------------------------------------------------------------------------ */
+    async verifyEmail(request, response) {
+        /* Base de la pantalla del front que muestra el resultado */
+        const front = `${ENVIRONMENT.URL_FRONTEND}/verificar-cuenta`;
+
+        try {
+
+            /* El token viaja como query param en la URL del link */
+            const { verification_token } = request.query;
+
+            if (!verification_token) {
+                throw new ServerError("Falta token de verificación", 400);
+            }
+
+            /* jwt.verify valida la firma y la expiracion. Si el token esta vencido
+               o fue adulterado, lanza una excepcion que capturamos abajo. */
+            const payload = jwt.verify(verification_token, ENVIRONMENT.JWT_SECRET);
+            const { email } = payload;
+            const user = await userRepository.getByEmail(email);
+
+            /* Si no existe un usuario con ese email, algo anda mal -> error */
+            if (!user) {
+                return response.redirect(`${front}?estado=error`);
+            }
+
+            /* Si ya estaba verificado, avisamos sin volver a procesar */
+            if (user.email_verificado) {
+                return response.redirect(`${front}?estado=ya-verificado`);
+            }
+
+            /* Marco la cuenta como verificada: recien ahora va a poder loguearse */
+            await userRepository.updateById(user._id, { email_verificado: true });
+
+            /* Verificacion exitosa: el front mostrara el cartel de bienvenida */
+            return response.redirect(`${front}?estado=ok`);
+
+        } catch (error) {
+            console.error('Error en verificación:', error);
+
+            /* Errores tipicos de JWT (vencido / firma invalida) -> "expirado".
+               Cualquier otra cosa -> "error" generico. */
+            if (
+                error instanceof jwt.JsonWebTokenError ||
+                error instanceof jwt.NotBeforeError ||
+                error instanceof jwt.TokenExpiredError
+            ) {
+                return response.redirect(`${front}?estado=expirado`);
+            } else {
+                return response.redirect(`${front}?estado=error`);
+            }
+        }
+    }
+
+    /* ------------------------------------------------------------------------
+       LOGIN
+       Flujo:
+         1. Validar email y password.
+         2. Buscar el usuario por email.
+         3. Bloquear si el email no fue verificado todavia.
+         4. Comparar la contrasena enviada contra el hash guardado.
+         5. Si todo ok, firmar un JWT con los datos del usuario (incluido el rol)
+            y devolverlo. Ese token es el que el front guarda y manda en cada
+            request protegido (header Authorization: Bearer <token>).
+       ------------------------------------------------------------------------ */
+    async login(request, response) {
+        try {
+            const { email, password } = request.body;
+
+            if (!email || !/^\S+@\S+\.\S+$/.test(email)) {
+                throw new ServerError("Email inválido", 400);
+            }
+
+            if (!password || password.length < 6) {
+                throw new ServerError("Contraseña inválida", 400);
+            }
+
+            const user_found = await userRepository.getByEmail(email);
+
+            if (!user_found) {
+                throw new ServerError("Usuario no registrado", 404);
+            }
+
+            /* Regla de negocio: no se puede loguear sin haber verificado el email.
+               Esto obliga a completar el circuito de verificacion. */
+            if (!user_found.email_verificado) {
+                throw new ServerError("Usuario con verificación de gmail pendiente", 401);
+            }
+
+            /* bcrypt.compare vuelve a hashear la pass enviada y la compara con el
+               hash guardado. Nunca se "desencripta" la contrasena. */
+            const is_same_password = await bcrypt.compare(password, user_found.password);
+
+            if (!is_same_password) {
+                throw new ServerError("Credenciales inválidas", 401);
+            }
+
+            /* Estos son los datos que van DENTRO del token. Incluimos el rol
+               porque el roleMiddleware lo necesita para autorizar acciones
+               (ej: solo 'director' puede crear aulas). NO incluimos la pass. */
+            const profile_info = {
+                nombre: user_found.nombre || user_found.name,
+                email: user_found.email,
+                id: user_found._id,
+                role: user_found.role,
+                fecha_creacion: user_found.fecha_creacion
+            };
+
+            /* Firmo el token de sesion. Vence en 3 horas: pasado ese tiempo el
+               usuario tiene que volver a loguearse (medida de seguridad). */
+            const access_token = jwt.sign(
+                profile_info,
+                ENVIRONMENT.JWT_SECRET,
+                { expiresIn: '3h' }
+            );
+
+            return response.status(200).json({
+                ok: true,
+                status: 200,
+                message: 'Usuario autenticado exitosamente',
+                data: {
+                    access_token
+                }
+            });
+        } catch (error) {
+            if (error instanceof ServerError) {
+                return response.status(error.status).json({
+                    message: error.message,
+                    ok: false,
+                    status: error.status
+                });
+            } else {
+                console.error('Error crítico en login:', error);
+                return response.status(500).json({
+                    message: "Error interno del servidor",
+                    ok: false,
+                    status: 500
+                });
+            }
+        }
+    }
+}
+
+const authController = new AuthController();
+export default authController;
