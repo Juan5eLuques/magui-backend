@@ -9,11 +9,13 @@ const aulaSchema = new mongoose.Schema({
         type: String,
         required: true
     },
-    /* Docente a cargo del aula. Es una FK a User. */
+    /* Docente a cargo del aula. Es una FK a User.
+       Es OPCIONAL: el aula puede crearse sin docente y asignarselo despues
+       (con un PUT). Mientras no tenga, queda en null. */
     docente: {
         type: mongoose.Schema.Types.ObjectId,
         ref: USER_COLLECTION_NAME,
-        required: true
+        default: null
     },
     turno: {
         type: String,

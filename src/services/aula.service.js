@@ -8,26 +8,27 @@ import { USER_ROLES } from '../const/roles.const.js'
    y el repository solo toca la base. */
 class AulaService {
 
-    /* Crear un aula. Valida nombre y que el docente exista y sea realmente un docente. */
+    /* Crear un aula. El nombre es obligatorio; el docente es OPCIONAL.
+       Si se manda un docente, se valida que exista y tenga rol docente.
+       Si no se manda, el aula queda sin docente (se asigna despues con un PUT). */
     async create({ nombre, docente, turno, descripcion }) {
         if (!nombre || nombre.trim().length < 2) {
             throw new ServerError("El nombre del aula debe tener al menos 2 caracteres", 400)
         }
 
-        if (!docente) {
-            throw new ServerError("Debe asignarse un docente al aula", 400)
+        /* Solo validamos el docente si efectivamente se envio uno */
+        if (docente) {
+            const docente_user = await userRepository.getById(docente)
+            if (!docente_user) {
+                throw new ServerError("El docente indicado no existe", 404)
+            }
+            if (docente_user.role !== USER_ROLES.DOCENTE) {
+                throw new ServerError("El usuario asignado no tiene rol de docente", 400)
+            }
         }
 
-        /* Verifico que el docente exista y tenga el rol correcto */
-        const docente_user = await userRepository.getById(docente)
-        if (!docente_user) {
-            throw new ServerError("El docente indicado no existe", 404)
-        }
-        if (docente_user.role !== USER_ROLES.DOCENTE) {
-            throw new ServerError("El usuario asignado no tiene rol de docente", 400)
-        }
-
-        return await aulaRepository.create({ nombre, docente, turno, descripcion })
+        /* Si docente vino vacio o undefined, lo guardamos como null */
+        return await aulaRepository.create({ nombre, docente: docente || null, turno, descripcion })
     }
 
     /* Lista todas las aulas (vista del director) */
@@ -67,13 +68,19 @@ class AulaService {
         if (turno !== undefined) update_data.turno = turno
         if (descripcion !== undefined) update_data.descripcion = descripcion
 
-        /* Si se quiere cambiar el docente, validarlo igual que en create */
+        /* Si se quiere cambiar el docente:
+           - si viene un id, validamos que sea un docente real y lo asignamos;
+           - si viene vacio o null, desasignamos (el aula queda sin docente). */
         if (docente !== undefined) {
-            const docente_user = await userRepository.getById(docente)
-            if (!docente_user || docente_user.role !== USER_ROLES.DOCENTE) {
-                throw new ServerError("El docente indicado no es valido", 400)
+            if (docente) {
+                const docente_user = await userRepository.getById(docente)
+                if (!docente_user || docente_user.role !== USER_ROLES.DOCENTE) {
+                    throw new ServerError("El docente indicado no es valido", 400)
+                }
+                update_data.docente = docente
+            } else {
+                update_data.docente = null
             }
-            update_data.docente = docente
         }
 
         if (Object.keys(update_data).length === 0) {

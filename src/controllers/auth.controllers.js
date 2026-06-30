@@ -6,6 +6,34 @@ import { USER_ROLES_LIST } from "../const/roles.const.js";
 import bcrypt from 'bcrypt';
 import jwt from 'jsonwebtoken';
 
+/* ----------------------------------------------------------------------------
+   Helper de modulo: arma el token de sesion + los datos publicos del usuario.
+   Lo usan tanto el login normal como el "entrar directo" de la recuperacion,
+   asi no repetimos el codigo en dos lados.
+
+   Va FUERA de la clase a proposito: como Express llama a los metodos del
+   controller como callbacks sueltos, el `this` dentro de ellos queda undefined.
+   Por eso no usamos `this.algo()`: una funcion de modulo no depende de `this`.
+   ---------------------------------------------------------------------------- */
+function generarSesion(user) {
+    const profile_info = {
+        nombre: user.nombre,
+        email: user.email,
+        id: user._id,
+        role: user.role
+    };
+    const access_token = jwt.sign(profile_info, ENVIRONMENT.JWT_SECRET, { expiresIn: '3h' });
+    return {
+        access_token,
+        user: {
+            id: user._id,
+            nombre: user.nombre,
+            email: user.email,
+            role: user.role
+        }
+    };
+}
+
 /* ============================================================================
    AuthController: maneja todo lo relacionado con la autenticacion de usuarios.
    - register:    crear cuenta + enviar mail de verificacion.
@@ -255,7 +283,16 @@ class AuthController {
                 status: 200,
                 message: 'Usuario autenticado exitosamente',
                 data: {
-                    access_token
+                    access_token,
+                    /* Devolvemos tambien los datos publicos del usuario, asi el
+                       frontend los usa directamente (mostrar nombre, decidir que
+                       ve cada rol) sin tener que leerlos desde el token. */
+                    user: {
+                        id: user_found._id,
+                        nombre: user_found.nombre,
+                        email: user_found.email,
+                        role: user_found.role
+                    }
                 }
             });
         } catch (error) {
@@ -273,6 +310,173 @@ class AuthController {
                     status: 500
                 });
             }
+        }
+    }
+
+    /* ------------------------------------------------------------------------
+       OLVIDE MI CONTRASENA (paso 1: pedir recuperacion)
+       Recibe un email. Si existe una cuenta con ese email, le manda un mail con
+       un link al FRONTEND que incluye un token de recuperacion (vence en 1 hora).
+
+       Nota de seguridad: respondemos SIEMPRE el mismo mensaje de exito, exista o
+       no el email. Asi no le revelamos a un atacante que emails estan registrados
+       (esto se llama no hacer "enumeracion de usuarios").
+       ------------------------------------------------------------------------ */
+    async forgotPassword(request, response) {
+        try {
+            const { email } = request.body;
+
+            if (!email || !/^\S+@\S+\.\S+$/.test(email)) {
+                throw new ServerError("Email inválido", 400);
+            }
+
+            const user = await userRepository.getByEmail(email);
+
+            /* Solo mandamos el mail si el usuario existe, pero la respuesta es la
+               misma en ambos casos (ver nota de seguridad arriba). */
+            if (user) {
+                /* Token con proposito 'recuperacion' para no confundirlo con otros.
+                   Vence en 1 hora: un link de reset no deberia durar mucho. */
+                const recovery_token = jwt.sign(
+                    { id: user._id, tipo: 'recuperacion' },
+                    ENVIRONMENT.JWT_SECRET,
+                    { expiresIn: '1h' }
+                );
+
+                /* El link apunta al FRONTEND (a diferencia de la verificacion de
+                   email): el front muestra una pantalla con las dos opciones. */
+                const link = `${ENVIRONMENT.URL_FRONTEND}/recuperar-cuenta?token=${recovery_token}`;
+
+                await mailer_transport.sendMail({
+                    to: email,
+                    from: ENVIRONMENT.GMAIL_USERNAME,
+                    subject: "Recuperá tu contraseña",
+                    html: `
+                        <h1>Recuperación de cuenta</h1>
+                        <p>Pediste recuperar el acceso a tu cuenta.</p>
+                        <p><a href='${link}'>Hacé click aquí</a> para continuar. El enlace vence en 1 hora.</p>
+                        <p>Si no fuiste vos, ignorá este mensaje.</p>
+                    `
+                });
+            }
+
+            return response.status(200).json({
+                ok: true,
+                status: 200,
+                message: "Si el email está registrado, te enviamos un enlace para recuperar tu cuenta."
+            });
+        } catch (error) {
+            if (error instanceof ServerError) {
+                return response.status(error.status).json({ message: error.message, ok: false, status: error.status });
+            }
+            console.error('Error en forgotPassword:', error);
+            return response.status(500).json({ message: "Error interno del servidor", ok: false, status: 500 });
+        }
+    }
+
+    /* ------------------------------------------------------------------------
+       RESETEAR CONTRASENA (opcion A del link: cambiar la contrasena)
+       Recibe el token de recuperacion + la contrasena nueva. Valida el token,
+       hashea la nueva contrasena y la guarda.
+       ------------------------------------------------------------------------ */
+    async resetPassword(request, response) {
+        try {
+            const { token, password } = request.body;
+
+            if (!token) {
+                throw new ServerError("Falta el token de recuperación", 400);
+            }
+            if (!password || password.length < 6) {
+                throw new ServerError("La contraseña debe tener al menos 6 caracteres", 400);
+            }
+
+            /* Validamos el token y, ademas, que sea del tipo correcto. Si alguien
+               intenta usar un token de login aca, lo rechazamos. */
+            const payload = jwt.verify(token, ENVIRONMENT.JWT_SECRET);
+            if (payload.tipo !== 'recuperacion') {
+                throw new ServerError("Token inválido para esta acción", 400);
+            }
+
+            const user = await userRepository.getById(payload.id);
+            if (!user) {
+                throw new ServerError("Usuario no encontrado", 404);
+            }
+
+            /* Hasheamos la nueva contrasena y la guardamos */
+            const hashed_password = await bcrypt.hash(password, 12);
+            await userRepository.updateById(user._id, { password: hashed_password });
+
+            return response.status(200).json({
+                ok: true,
+                status: 200,
+                message: "Contraseña actualizada. Ya podés iniciar sesión."
+            });
+        } catch (error) {
+            if (
+                error instanceof jwt.JsonWebTokenError ||
+                error instanceof jwt.TokenExpiredError ||
+                error instanceof jwt.NotBeforeError
+            ) {
+                return response.status(401).json({ message: "El enlace venció o no es válido", ok: false, status: 401 });
+            }
+            if (error instanceof ServerError) {
+                return response.status(error.status).json({ message: error.message, ok: false, status: error.status });
+            }
+            console.error('Error en resetPassword:', error);
+            return response.status(500).json({ message: "Error interno del servidor", ok: false, status: 500 });
+        }
+    }
+
+    /* ------------------------------------------------------------------------
+       ENTRAR DIRECTO (opcion B del link: iniciar sesion sin cambiar nada)
+       Recibe el token de recuperacion y, si es valido, devuelve un token de
+       sesion normal (como el del login). Asi la persona entra sin tocar la
+       contrasena.
+
+       Nota: por seguridad, lo ideal seria obligar a cambiarla. Esta opcion existe
+       porque se pidio expresamente. El token de recuperacion es de un solo uso
+       practico (vida corta) para acotar el riesgo.
+       ------------------------------------------------------------------------ */
+    async loginWithRecoveryToken(request, response) {
+        try {
+            const { token } = request.body;
+
+            if (!token) {
+                throw new ServerError("Falta el token de recuperación", 400);
+            }
+
+            const payload = jwt.verify(token, ENVIRONMENT.JWT_SECRET);
+            if (payload.tipo !== 'recuperacion') {
+                throw new ServerError("Token inválido para esta acción", 400);
+            }
+
+            const user = await userRepository.getById(payload.id);
+            if (!user) {
+                throw new ServerError("Usuario no encontrado", 404);
+            }
+
+            /* Generamos una sesion normal (mismo formato que el login) */
+            const sesion = generarSesion(user);
+
+            return response.status(200).json({
+                ok: true,
+                status: 200,
+                message: 'Ingresaste correctamente',
+                data: sesion
+            });
+        } catch (error) {
+            if (
+                error instanceof jwt.JsonWebTokenError ||
+                error instanceof jwt.TokenExpiredError ||
+                error instanceof jwt.NotBeforeError
+            ) {
+                return response.status(401).json({ message: "El enlace venció o no es válido", ok: false, status: 401 });
+            }
+            if (error instanceof ServerError) {
+                return response.status(error.status).json({ message: error.message, ok: false, status: error.status });
+            }
+            console.error('Error en loginWithRecoveryToken:', error);
+            return response.status(500).json({ message: "Error interno del servidor", ok: false, status: 500 });
         }
     }
 }
