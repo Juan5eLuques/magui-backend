@@ -3,6 +3,7 @@ import mailer_transport from "../config/mailer.config.js";
 import ServerError from "../helpers/serverError.helper.js";
 import userRepository from "../repositories/user.repository.js";
 import { USER_ROLES_LIST } from "../const/roles.const.js";
+import userService from "../services/user.service.js";
 import bcrypt from 'bcrypt';
 import jwt from 'jsonwebtoken';
 
@@ -46,29 +47,16 @@ function generarSesion(user) {
    ============================================================================ */
 class AuthController {
 
-    /* ------------------------------------------------------------------------
-       REGISTRO DE USUARIO
-       Flujo:
-         1. Validar los datos que mando el cliente (nombre, email, pass, rol).
-         2. Verificar que el email no este ya registrado.
-         3. Hashear la contrasena (nunca se guarda en texto plano).
-         4. Generar un token de verificacion y crear el usuario con ese token.
-         5. Enviar un mail con un link que incluye ese token.
-       El usuario queda creado pero con email_verificado=false hasta que confirme.
-       ------------------------------------------------------------------------ */
+
     async register(request, response) {
         try {
 
             const { nombre, email, password, role } = request.body;
 
-            /* Validaciones de entrada: cortamos temprano si algo no cumple.
-               Se usa ServerError (status 400 = "bad request") para devolver
-               un mensaje claro al cliente sobre que dato esta mal. */
+
             if (!nombre || nombre.length <= 2) {
                 throw new ServerError("Nombre debe ser mayor a 2 caracteres", 400);
             }
-
-            /* Regex simple para chequear formato de email (algo@algo.algo) */
             if (!email || !/^\S+@\S+\.\S+$/.test(email)) {
                 throw new ServerError("Email inválido", 400);
             }
@@ -77,14 +65,13 @@ class AuthController {
                 throw new ServerError("Password debe tener al menos 6 caracteres", 400);
             }
 
-            /* El rol debe ser uno de los permitidos: director, docente o familia.
-               USER_ROLES_LIST viene de las constantes, asi evitamos roles invalidos. */
             if (!role || !USER_ROLES_LIST.includes(role)) {
                 throw new ServerError("Rol inválido. Debe ser: " + USER_ROLES_LIST.join(', '), 400);
             }
 
             /* No permitimos dos cuentas con el mismo email */
-            const existingUser = await userRepository.getByEmail(email);
+
+            const existingUser = await userService.getByEmail(email);
             if (existingUser) {
                 throw new ServerError("El email ya está registrado", 400);
             }
@@ -105,7 +92,7 @@ class AuthController {
             );
 
             /* Creo el usuario en la base. Queda con email_verificado=false (default). */
-            const newUser = await userRepository.create(nombre, email, hashed_password, role, verification_token);
+            const newUser = await userService.create(nombre, email, hashed_password, role, verification_token);
 
             /* Envio el mail de verificacion. El link apunta a la API (que es quien
                valida el token); la API despues redirige al frontend. */
@@ -181,7 +168,7 @@ class AuthController {
                o fue adulterado, lanza una excepcion que capturamos abajo. */
             const payload = jwt.verify(verification_token, ENVIRONMENT.JWT_SECRET);
             const { email } = payload;
-            const user = await userRepository.getByEmail(email);
+            const user = await userService.getByEmail(email);
 
             /* Si no existe un usuario con ese email, algo anda mal -> error */
             if (!user) {
@@ -194,7 +181,7 @@ class AuthController {
             }
 
             /* Marco la cuenta como verificada: recien ahora va a poder loguearse */
-            await userRepository.updateById(user._id, { email_verificado: true });
+            await userService.updateById(user._id, { email_verificado: true });
 
             /* Verificacion exitosa: el front mostrara el cartel de bienvenida */
             return response.redirect(`${front}?estado=ok`);
@@ -239,7 +226,7 @@ class AuthController {
                 throw new ServerError("Contraseña inválida", 400);
             }
 
-            const user_found = await userRepository.getByEmail(email);
+            const user_found = await userService.getByEmail(email);
 
             if (!user_found) {
                 throw new ServerError("Usuario no registrado", 404);
@@ -330,7 +317,7 @@ class AuthController {
                 throw new ServerError("Email inválido", 400);
             }
 
-            const user = await userRepository.getByEmail(email);
+            const user = await userService.getByEmail(email);
 
             /* Solo mandamos el mail si el usuario existe, pero la respuesta es la
                misma en ambos casos (ver nota de seguridad arriba). */
@@ -397,14 +384,14 @@ class AuthController {
                 throw new ServerError("Token inválido para esta acción", 400);
             }
 
-            const user = await userRepository.getById(payload.id);
+            const user = await userService.getById(payload.id);
             if (!user) {
                 throw new ServerError("Usuario no encontrado", 404);
             }
 
             /* Hasheamos la nueva contrasena y la guardamos */
             const hashed_password = await bcrypt.hash(password, 12);
-            await userRepository.updateById(user._id, { password: hashed_password });
+            await userService.updateById(user._id, { password: hashed_password });
 
             return response.status(200).json({
                 ok: true,
@@ -450,7 +437,7 @@ class AuthController {
                 throw new ServerError("Token inválido para esta acción", 400);
             }
 
-            const user = await userRepository.getById(payload.id);
+            const user = await userService.getById(payload.id);
             if (!user) {
                 throw new ServerError("Usuario no encontrado", 404);
             }

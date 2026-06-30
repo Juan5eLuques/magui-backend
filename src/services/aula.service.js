@@ -3,14 +3,8 @@ import aulaRepository from '../repositories/aula.repository.js'
 import userRepository from '../repositories/user.repository.js'
 import { USER_ROLES } from '../const/roles.const.js'
 
-/* Capa de logica de negocio del Aula.
-   Aca van las validaciones y reglas. El controller solo orquesta request/response,
-   y el repository solo toca la base. */
 class AulaService {
 
-    /* Crear un aula. El nombre es obligatorio; el docente es OPCIONAL.
-       Si se manda un docente, se valida que exista y tenga rol docente.
-       Si no se manda, el aula queda sin docente (se asigna despues con un PUT). */
     async create({ nombre, docente, turno, descripcion }) {
         if (!nombre || nombre.trim().length < 2) {
             throw new ServerError("El nombre del aula debe tener al menos 2 caracteres", 400)
