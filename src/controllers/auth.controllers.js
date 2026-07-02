@@ -96,10 +96,10 @@ class AuthController {
 
             /* Envio el mail de verificacion. El link apunta a la API (que es quien
                valida el token); la API despues redirige al frontend. */
+            /* Nota: no pasamos 'from'; el mailer usa el remitente por defecto de Resend. */
             await mailer_transport.sendMail({
                 to: email,
-                from: ENVIRONMENT.GMAIL_USERNAME,
-                subject: "Verifica tu gmail",
+                subject: "Verificá tu cuenta",
                 html: `
                     <h1>Bienvenido/a a la Plataforma</h1>
                     <p><a href='${ENVIRONMENT.URL_BACKEND}/api/auth/verify-email?verification_token=${verification_token}'>Click aquí</a> para verificar tu cuenta.</p>
@@ -336,7 +336,6 @@ class AuthController {
 
                 await mailer_transport.sendMail({
                     to: email,
-                    from: ENVIRONMENT.GMAIL_USERNAME,
                     subject: "Recuperá tu contraseña",
                     html: `
                         <h1>Recuperación de cuenta</h1>

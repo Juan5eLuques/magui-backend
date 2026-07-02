@@ -15,7 +15,6 @@ class EntrevistaService {
         try {
             await mailer_transport.sendMail({
                 to: director.email,
-                from: ENVIRONMENT.GMAIL_USERNAME,
                 subject: "Nueva solicitud de entrevista",
                 html: `
                     <h1>Nueva solicitud de entrevista</h1>
