@@ -19,4 +19,11 @@ userRouter.get(
     userController.getDocentes
 )
 
+userRouter.get(
+    '/docentes-disponibles',
+    authMiddleware,
+    roleMiddleware([USER_ROLES.DIRECTOR]),
+    userController.getDocentesDisponibles
+)
+
 export default userRouter

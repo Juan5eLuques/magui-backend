@@ -1,4 +1,6 @@
 import User from "../models/user.model.js"
+import Aula from "../models/aula.model.js"
+import { USER_ROLES } from "../const/roles.const.js"
 
 /* ============================================================================
    UserRepository: capa de ACCESO A DATOS de los usuarios.
@@ -40,6 +42,17 @@ class UserRepository {
     async getByRole(role) {
         return await User.find({ role: role, activo: true })
     }
+
+    async getDocentesDisponibles() {
+    
+    const idsConAula = await Aula.distinct('docente', { activo: true })
+
+    return await User.find({
+        role: USER_ROLES.DOCENTE,
+        activo: true,
+        _id: { $nin: idsConAula }
+    })      
+}
 
     /* Elimina un usuario de forma definitiva (borrado fisico) */
     async deleteById(user_id) {

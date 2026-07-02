@@ -99,7 +99,7 @@ class AlumnoService {
         }
         const aula_id = alumno.aula?._id ? alumno.aula._id.toString() : alumno.aula.toString()
         await this.#checkAulaPermiso(aula_id, user)
-        return await alumnoRepository.softDeleteById(alumno_id)
+        return await alumnoRepository.deleteById(alumno_id)
     }
 }
 

@@ -32,6 +32,10 @@ class AlumnoRepository {
     async countByAula(aula_id) {
         return await Alumno.countDocuments({ aula: aula_id, activo: true })
     }
+
+    async deleteById(alumno_id) {
+        return await Alumno.findByIdAndDelete(alumno_id)
+    }
 }
 
 const alumnoRepository = new AlumnoRepository()

@@ -16,6 +16,10 @@ class UserService {
         return await userRepository.getByRole(USER_ROLES.DOCENTE)
     }
 
+    async getDocentesDisponibles() {
+        return await userRepository.getDocentesDisponibles()
+    }
+
     async getByEmail(email) {
         return await userRepository.getByEmail(email)
     }
